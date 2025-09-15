@@ -83,15 +83,15 @@
 	cudaFree(d_C_ ## name);
 
 __global__ void gemm_gpu_o0_kernel(float* A, float* B, float *C, int M, int N, int K) {
-	if (threadIdx.x == 0 && blockIdx.x == 0) {
-		for (int i = 0; i < M; i++) {
-			for (int j = 0; j < N; j++) {
-				for (int k = 0; k < K; k++) {
-					C[i * N + j]  += A[i * K + k]  * B[k * N + j];
-				}
-			}
-		}
-    }
+	// if (threadIdx.x == 0 && blockIdx.x == 0) {
+	// 	for (int i = 0; i < M; i++) {
+	// 		for (int j = 0; j < N; j++) {
+	// 			for (int k = 0; k < K; k++) {
+	// 				C[i * N + j]  += A[i * K + k]  * B[k * N + j];
+	// 			}
+	// 		}
+	// 	}
+  // }
 }
 
 void gemm_gpu_o0(float* A, float* B, float* C, int M, int N, int K)
@@ -104,17 +104,71 @@ void gemm_gpu_o0(float* A, float* B, float* C, int M, int N, int K)
 
 // The scafolding for optimized GEMM implementations
 __global__ void gemm_gpu_o1_kernel(float* A, float* B, float *C, int M, int N, int K) {
+  int row=blockIdx.y*blockDim.y+threadIdx.y;
+  int col=blockIdx.x*blockDim.x+threadIdx.x;
+  if(row>=M||col>=N){
+    return;
+  }
+
+  float result=0.0f;
+  
+  int offset_a=row*K;
+  for(int i=0;i<K;i++){
+      result+=A[offset_a+i]*B[i*N+col];
+  }
+
+  C[row*N+col]=result;
 }
+
 void gemm_gpu_o1(float* A, float* B, float* C, int M, int N, int K)
 {
 	// Init block and grid size
+  dim3 blockSize(16,16);
+  dim3 gridSize((N+blockSize.x-1)/blockSize.x,(M+blockSize.y-1)/blockSize.y);
+	gemm_gpu_o1_kernel<<<gridSize, blockSize>>>(A, B, C, M, N, K);
 }
 
+const int BLOCK_SIZE_O2=16;
+
 __global__ void gemm_gpu_o2_kernel(float* A, float* B, float *C, int M, int N, int K) {
+  int row=blockIdx.y*blockDim.y+threadIdx.y;
+  int col=blockIdx.x*blockDim.x+threadIdx.x;
+
+  __shared__ float shared_A[BLOCK_SIZE_O2][BLOCK_SIZE_O2];
+  __shared__ float shared_B[BLOCK_SIZE_O2][BLOCK_SIZE_O2];
+
+  float result=0.0f;
+
+  for(int offset=0;offset<K+BLOCK_SIZE_O2-1;offset+=BLOCK_SIZE_O2){
+    if(row<M&&offset+threadIdx.x<K){
+      shared_A[threadIdx.y][threadIdx.x]=A[row*K+offset+threadIdx.x];
+    }else{
+      shared_A[threadIdx.y][threadIdx.x]=0.0f;
+    }
+    if(col<N&&offset+threadIdx.y<K){
+      shared_B[threadIdx.y][threadIdx.x]=B[(offset+threadIdx.y)*N+threadIdx.x];
+    }else{
+      shared_B[threadIdx.y][threadIdx.x]=0.0f;
+    }
+    __syncthreads();
+
+    for(int i=0;i<BLOCK_SIZE_O2;i++) {
+      result+=shared_A[threadIdx.y][i]*shared_B[i][threadIdx.x];
+    }
+    __syncthreads();
+  }
+
+  if(row<M&&col<N){
+    C[row*N+col]=result;
+  }
 }
+
 void gemm_gpu_o2(float* A, float* B, float* C, int M, int N, int K)
 {
 	// Init block and grid size
+  dim3 blockSize(BLOCK_SIZE_O2,BLOCK_SIZE_O2);
+  dim3 gridSize((N+blockSize.x-1)/blockSize.x,(M+blockSize.y-1)/blockSize.y);
+	gemm_gpu_o2_kernel<<<gridSize, blockSize>>>(A, B, C, M, N, K);
 }
 
 __global__ void gemm_gpu_o3_kernel(float* A, float* B, float *C, int M, int N, int K) {

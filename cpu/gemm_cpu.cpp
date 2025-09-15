@@ -45,15 +45,68 @@ void gemm_cpu_o0(float* A, float* B, float *C, int M, int N, int K) {
 // Your optimized implementations go here
 // note that for o4 you don't have to change the code, but just the compiler flags. So, you can use o3's code for that part
 void gemm_cpu_o1(float* A, float* B, float *C, int M, int N, int K) {
+  for(int i=0;i<M;i++){
+    int offset_c=i*N;
+    int offset_a=i*K;
+    for(int k=0;k<K;k++){
+      int offset_b=k*N;
+      for(int j=0;j<N;j++){
+        C[offset_c+j]+=A[offset_a+k]*B[offset_b+j];
+      }
+    }
+  }
+}
 
+int min_int(int a, int b){
+  return a<=b?a:b;
 }
 
 void gemm_cpu_o2(float* A, float* B, float *C, int M, int N, int K) {
+  const int block_size=64;
 
+  for(int i=0;i<M;i++){
+    int offset_a=i*K;
+    int offset_c=i*N;
+
+    for(int start_j=0;start_j<N;start_j+=block_size){
+      int end_j=min_int(start_j+block_size,N);
+      for(int start_k=0;start_k<K;start_k+=block_size){
+        int end_k=min_int(start_k+block_size,K);
+
+        for(int j=start_j;j<end_j;j++){
+          for(int k=start_k;k<end_k;++k){
+            C[offset_c+j]+=A[offset_a+k]*B[k*N+j];
+          }
+        }
+      }
+    }
+  }
 }
 
 void gemm_cpu_o3(float* A, float* B, float *C, int M, int N, int K) {
+  const int block_size=64;
 
+  #pragma omp parallel for
+  for(int i=0;i<M;i++){
+    int offset_a=i*K;
+    int offset_c=i*N;
+
+    for(int start_j=0;start_j<N;start_j+=block_size){
+      int end_j=min_int(start_j+block_size,N);
+      for(int start_k=0;start_k<K;start_k+=block_size){
+        int end_k=min_int(start_k+block_size,K);
+
+        for(int j=start_j;j<end_j;j++){
+          float result=C[offset_c+j];
+          #pragma omp simd reduction(+:result)
+          for(int k=start_k;k<end_k;++k){
+            result+=A[offset_a+k]*B[k*N+j];
+          }
+          C[offset_c+j]=result;
+        }
+      }
+    }
+  }
 }
 
 
