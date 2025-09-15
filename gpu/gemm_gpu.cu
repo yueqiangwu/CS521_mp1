@@ -1,5 +1,6 @@
 #include "../include/utils.h"
 #include <cuda_runtime.h>
+#include <cublas_v2.h>
 
 #define NUM_RUNS 10
 
@@ -83,15 +84,15 @@
 	cudaFree(d_C_ ## name);
 
 __global__ void gemm_gpu_o0_kernel(float* A, float* B, float *C, int M, int N, int K) {
-	// if (threadIdx.x == 0 && blockIdx.x == 0) {
-	// 	for (int i = 0; i < M; i++) {
-	// 		for (int j = 0; j < N; j++) {
-	// 			for (int k = 0; k < K; k++) {
-	// 				C[i * N + j]  += A[i * K + k]  * B[k * N + j];
-	// 			}
-	// 		}
-	// 	}
-  // }
+	if (threadIdx.x == 0 && blockIdx.x == 0) {
+		for (int i = 0; i < M; i++) {
+			for (int j = 0; j < N; j++) {
+				for (int k = 0; k < K; k++) {
+					C[i * N + j]  += A[i * K + k]  * B[k * N + j];
+				}
+			}
+		}
+  }
 }
 
 void gemm_gpu_o0(float* A, float* B, float* C, int M, int N, int K)
@@ -171,11 +172,69 @@ void gemm_gpu_o2(float* A, float* B, float* C, int M, int N, int K)
 	gemm_gpu_o2_kernel<<<gridSize, blockSize>>>(A, B, C, M, N, K);
 }
 
+const int BLOCK_SIZE_O3=16;
+
 __global__ void gemm_gpu_o3_kernel(float* A, float* B, float *C, int M, int N, int K) {
+  int row=blockIdx.y*blockDim.y+threadIdx.y;
+  int col=blockIdx.x*blockDim.x+threadIdx.x;
+
+  __shared__ float shared_A[BLOCK_SIZE_O3][BLOCK_SIZE_O3];
+  __shared__ float shared_B[BLOCK_SIZE_O3][BLOCK_SIZE_O3];
+
+  float result=0.0f;
+
+  for(int offset=0;offset<K+BLOCK_SIZE_O3-1;offset+=BLOCK_SIZE_O3){
+    if(row<M&&offset+threadIdx.x<K){
+      shared_A[threadIdx.y][threadIdx.x]=A[row*K+offset+threadIdx.x];
+    }else{
+      shared_A[threadIdx.y][threadIdx.x]=0.0f;
+    }
+    if(col<N&&offset+threadIdx.y<K){
+      shared_B[threadIdx.y][threadIdx.x]=B[(offset+threadIdx.y)*N+threadIdx.x];
+    }else{
+      shared_B[threadIdx.y][threadIdx.x]=0.0f;
+    }
+    __syncthreads();
+
+    for(int i=0;i<BLOCK_SIZE_O3;i++) {
+      result+=shared_A[threadIdx.y][i]*shared_B[i][threadIdx.x];
+    }
+    __syncthreads();
+  }
+
+  if(row<M&&col<N){
+    C[row*N+col]=result;
+  }
 }
+
 void gemm_gpu_o3(float* A, float* B, float* C, int M, int N, int K)
 {
 	// Init block and grid size
+  dim3 blockSize(BLOCK_SIZE_O3,BLOCK_SIZE_O3);
+  dim3 gridSize((N+blockSize.x-1)/blockSize.x,(M+blockSize.y-1)/blockSize.y);
+	gemm_gpu_o3_kernel<<<gridSize, blockSize>>>(A, B, C, M, N, K);
+}
+
+void gemm_gpu_cublas(float* A, float* B, float* C, int M, int N, int K)
+{
+    cublasHandle_t handle;
+    cublasCreate(&handle);
+
+    float alpha = 1.0f;
+    float beta  = 0.0f;
+
+    cublasSgemm(
+        handle,
+        CUBLAS_OP_N, CUBLAS_OP_N,
+        N, M, K,
+        &alpha,
+        B, N,
+        A, K,
+        &beta,
+        C, N
+    );
+
+    cublasDestroy(handle);
 }
 
 
@@ -199,19 +258,21 @@ int main(int argc, char* argv[]) {
 	fillRandom(B, K * N);
 
 	/// GPU Implementation
-        // Check if implementation is correct
+  // Check if implementation is correct
 	auto ref = Ref();
 	float* refC = new float[Ref::M * Ref::N]();
  	CHECK(gemm_gpu_o0)
 	CHECK(gemm_gpu_o1)
 	CHECK(gemm_gpu_o2)
 	CHECK(gemm_gpu_o3)
+  CHECK(gemm_gpu_cublas)
 
 	// Actual run
- 	TIME(gemm_gpu_o0)
+ 	//TIME(gemm_gpu_o0)
 	TIME(gemm_gpu_o1)
 	TIME(gemm_gpu_o2)
 	TIME(gemm_gpu_o3)
+  TIME(gemm_gpu_cublas)
 
 	cudaFreeHost(A);
 	cudaFreeHost(B);
